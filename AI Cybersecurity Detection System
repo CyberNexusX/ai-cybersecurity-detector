@@ -1,0 +1,346 @@
+"""
+AI-based Cybersecurity Threat Detection System
+This is a basic implementation that demonstrates:
+1. Log processing and feature extraction
+2. Anomaly detection using machine learning
+3. Alert generation
+"""
+
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import IsolationForest
+from sklearn.preprocessing import StandardScaler
+import logging
+import json
+from datetime import datetime
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler("security_detector.log"),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger("AI-CyberDetector")
+
+class AIThreatDetector:
+    def __init__(self, contamination=0.01):
+        """
+        Initialize the AI threat detector
+        
+        Args:
+            contamination: Expected proportion of anomalies in the dataset
+        """
+        self.model = IsolationForest(contamination=contamination, random_state=42)
+        self.scaler = StandardScaler()
+        self.is_trained = False
+        logger.info("AI Threat Detector initialized")
+        
+    def preprocess_logs(self, logs_data):
+        """
+        Extract features from log data
+        
+        Args:
+            logs_data: Raw log data (list of dictionaries)
+            
+        Returns:
+            DataFrame with extracted features
+        """
+        logger.info(f"Preprocessing {len(logs_data)} log entries")
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(logs_data)
+        
+        # Extract basic features
+        features = pd.DataFrame()
+        
+        # Process timestamp if available
+        if 'timestamp' in df.columns:
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+            features['hour_of_day'] = df['timestamp'].dt.hour
+            features['day_of_week'] = df['timestamp'].dt.dayofweek
+            
+        # Process source IP if available
+        if 'source_ip' in df.columns:
+            # Count requests per IP
+            ip_counts = df.groupby('source_ip').size().to_dict()
+            features['ip_request_count'] = df['source_ip'].map(ip_counts)
+            
+        # Process request types if available
+        if 'request_type' in df.columns:
+            # One-hot encode request types
+            request_dummies = pd.get_dummies(df['request_type'], prefix='req')
+            features = pd.concat([features, request_dummies], axis=1)
+            
+        # Process response codes if available
+        if 'response_code' in df.columns:
+            features['is_error'] = df['response_code'] >= 400
+            features['is_server_error'] = df['response_code'] >= 500
+            
+        # Process request size if available
+        if 'request_size' in df.columns:
+            features['request_size'] = df['request_size']
+            
+        # Process response time if available
+        if 'response_time' in df.columns:
+            features['response_time'] = df['response_time']
+            
+        # Add log entry ID for reference
+        features['log_id'] = df.index
+            
+        return features
+
+    def train(self, logs_data):
+        """
+        Train the anomaly detection model
+        
+        Args:
+            logs_data: Raw log data for training
+            
+        Returns:
+            Self (for method chaining)
+        """
+        # Extract features
+        features = self.preprocess_logs(logs_data)
+        
+        # Select only numeric columns for training
+        numeric_features = features.select_dtypes(include=[np.number])
+        numeric_features = numeric_features.drop(columns=['log_id'], errors='ignore')
+        
+        if numeric_features.empty:
+            logger.error("No numeric features available for training")
+            raise ValueError("No numeric features available for training")
+            
+        logger.info(f"Training model with {numeric_features.shape[1]} features")
+        
+        # Scale the features
+        scaled_features = self.scaler.fit_transform(numeric_features)
+        
+        # Train the model
+        self.model.fit(scaled_features)
+        self.is_trained = True
+        
+        logger.info("Model training completed")
+        return self
+    
+    def detect(self, logs_data, threshold=-0.5):
+        """
+        Detect anomalies in log data
+        
+        Args:
+            logs_data: Raw log data to analyze
+            threshold: Decision threshold for anomaly scores (lower is more anomalous)
+            
+        Returns:
+            Dictionary of detected threats with anomaly scores
+        """
+        if not self.is_trained:
+            logger.error("Model has not been trained. Call train() first.")
+            raise RuntimeError("Model has not been trained")
+            
+        # Extract features
+        features = self.preprocess_logs(logs_data)
+        log_ids = features['log_id'].values
+        
+        # Select only numeric columns for prediction
+        numeric_features = features.select_dtypes(include=[np.number])
+        numeric_features = numeric_features.drop(columns=['log_id'], errors='ignore')
+        
+        # Scale the features
+        scaled_features = self.scaler.transform(numeric_features)
+        
+        # Predict anomaly scores
+        anomaly_scores = self.model.decision_function(scaled_features)
+        predictions = self.model.predict(scaled_features)
+        
+        # Collect anomalies
+        threats = []
+        for i, (score, pred) in enumerate(zip(anomaly_scores, predictions)):
+            if score < threshold or pred == -1:
+                log_id = int(log_ids[i])
+                threats.append({
+                    'log_id': log_id,
+                    'log_entry': logs_data[log_id],
+                    'anomaly_score': float(score),
+                    'severity': self._calculate_severity(score)
+                })
+        
+        logger.info(f"Detection completed. Found {len(threats)} potential threats.")
+        return threats
+    
+    def _calculate_severity(self, anomaly_score):
+        """
+        Calculate severity level based on anomaly score
+        
+        Args:
+            anomaly_score: Anomaly score from the model
+            
+        Returns:
+            String representing severity level
+        """
+        if anomaly_score < -0.8:
+            return "CRITICAL"
+        elif anomaly_score < -0.6:
+            return "HIGH"
+        elif anomaly_score < -0.4:
+            return "MEDIUM"
+        else:
+            return "LOW"
+            
+    def generate_alerts(self, threats):
+        """
+        Generate formatted alerts from detected threats
+        
+        Args:
+            threats: List of threat dictionaries
+            
+        Returns:
+            List of formatted alert dictionaries
+        """
+        alerts = []
+        for threat in threats:
+            alert = {
+                'timestamp': datetime.now().isoformat(),
+                'severity': threat['severity'],
+                'anomaly_score': threat['anomaly_score'],
+                'details': threat['log_entry'],
+                'alert_id': f"ALERT-{datetime.now().strftime('%Y%m%d%H%M%S')}-{len(alerts)}"
+            }
+            alerts.append(alert)
+            
+            # Log the alert
+            logger.warning(f"Alert {alert['alert_id']} ({alert['severity']}): "
+                          f"Anomaly detected in log entry {threat['log_id']}")
+            
+        return alerts
+    
+    def save_model(self, filepath):
+        """Save the trained model to a file"""
+        import joblib
+        if not self.is_trained:
+            logger.error("Cannot save untrained model")
+            raise RuntimeError("Model has not been trained")
+            
+        model_data = {
+            'model': self.model,
+            'scaler': self.scaler,
+            'is_trained': self.is_trained
+        }
+        joblib.dump(model_data, filepath)
+        logger.info(f"Model saved to {filepath}")
+        
+    @classmethod
+    def load_model(cls, filepath):
+        """Load a trained model from a file"""
+        import joblib
+        model_data = joblib.load(filepath)
+        
+        detector = cls()
+        detector.model = model_data['model']
+        detector.scaler = model_data['scaler']
+        detector.is_trained = model_data['is_trained']
+        
+        logger.info(f"Model loaded from {filepath}")
+        return detector
+
+# Example usage function
+def demo():
+    # Generate some sample log data
+    sample_logs = []
+    normal_ips = [f"192.168.1.{i}" for i in range(1, 20)]
+    
+    # Generate normal traffic logs
+    for i in range(1000):
+        log = {
+            'timestamp': (datetime.now().replace(microsecond=0) - pd.Timedelta(minutes=np.random.randint(0, 1440))).isoformat(),
+            'source_ip': np.random.choice(normal_ips),
+            'request_type': np.random.choice(['GET', 'POST', 'PUT'], p=[0.7, 0.2, 0.1]),
+            'endpoint': np.random.choice(['/home', '/api/data', '/user/profile', '/settings']),
+            'response_code': np.random.choice([200, 301, 302, 404], p=[0.85, 0.05, 0.05, 0.05]),
+            'response_time': np.random.normal(0.2, 0.05),
+            'request_size': np.random.normal(500, 100),
+            'user_agent': 'Mozilla/5.0'
+        }
+        sample_logs.append(log)
+    
+    # Add some anomalous logs
+    # 1. Unusual IP with many requests
+    unusual_ip = "10.0.0.99"
+    for i in range(50):
+        log = {
+            'timestamp': (datetime.now().replace(microsecond=0) - pd.Timedelta(minutes=np.random.randint(0, 60))).isoformat(),
+            'source_ip': unusual_ip,
+            'request_type': 'POST',
+            'endpoint': '/api/login',
+            'response_code': 401,
+            'response_time': np.random.normal(0.1, 0.01),
+            'request_size': np.random.normal(300, 50),
+            'user_agent': 'Mozilla/5.0'
+        }
+        sample_logs.append(log)
+    
+    # 2. Large requests
+    for i in range(10):
+        log = {
+            'timestamp': (datetime.now().replace(microsecond=0) - pd.Timedelta(minutes=np.random.randint(0, 10))).isoformat(),
+            'source_ip': np.random.choice(normal_ips),
+            'request_type': 'POST',
+            'endpoint': '/api/upload',
+            'response_code': 200,
+            'response_time': np.random.normal(1.5, 0.2),
+            'request_size': np.random.normal(5000, 500),
+            'user_agent': 'Mozilla/5.0'
+        }
+        sample_logs.append(log)
+    
+    # 3. Server errors
+    for i in range(5):
+        log = {
+            'timestamp': (datetime.now().replace(microsecond=0) - pd.Timedelta(minutes=np.random.randint(0, 30))).isoformat(),
+            'source_ip': np.random.choice(normal_ips),
+            'request_type': 'GET',
+            'endpoint': '/api/reports',
+            'response_code': 500,
+            'response_time': np.random.normal(2.0, 0.5),
+            'request_size': np.random.normal(400, 50),
+            'user_agent': 'Mozilla/5.0'
+        }
+        sample_logs.append(log)
+    
+    # Initialize and train the detector
+    detector = AIThreatDetector(contamination=0.05)
+    
+    # Split data into training and testing
+    train_size = int(len(sample_logs) * 0.7)
+    train_logs = sample_logs[:train_size]
+    test_logs = sample_logs[train_size:]
+    
+    # Train the model
+    detector.train(train_logs)
+    
+    # Save the model
+    detector.save_model("threat_detector_model.joblib")
+    
+    # Detect threats
+    threats = detector.detect(test_logs)
+    
+    # Generate alerts
+    alerts = detector.generate_alerts(threats)
+    
+    # Display results
+    print(f"Analyzed {len(test_logs)} log entries")
+    print(f"Detected {len(threats)} potential threats")
+    print(f"Generated {len(alerts)} alerts")
+    
+    # Save alerts to file
+    with open("alerts.json", "w") as f:
+        json.dump(alerts, f, indent=2)
+    
+    print("Alerts saved to alerts.json")
+    
+    return detector, threats, alerts
+
+if __name__ == "__main__":
+    demo()
